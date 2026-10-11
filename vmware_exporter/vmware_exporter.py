@@ -98,7 +98,8 @@ class VmwareCollector():
             'vm_perf': ['vm_name', 'ds_name', 'host_name', 'dc_name', 'cluster_name'],
             'vmguests': ['vm_name', 'ds_name', 'host_name', 'dc_name', 'cluster_name'],
             'snapshots': ['vm_name', 'ds_name', 'host_name', 'dc_name', 'cluster_name'],
-            'datastores': ['ds_name', 'dc_name', 'ds_cluster'],
+            # ds_id is vCenter-scoped and remains stable when a datastore is renamed.
+            'datastores': ['ds_name', 'ds_id', 'dc_name', 'ds_cluster'],
             'hosts': ['host_name', 'dc_name', 'cluster_name'],
             'host_perf': ['host_name', 'dc_name', 'cluster_name'],
         }
@@ -993,7 +994,9 @@ class VmwareCollector():
                     inventory.update(_collect(child, level + 1, dc, node.name))
             elif isinstance(node, vim.Datastore):
                 logging.debug("[Datastore ] {level} {name}".format(name=node.name, level=('-' * level).ljust(7)))
-                inventory[node.name] = [node.name, dc, storagePod]
+                # The managed object ID is vCenter-scoped and remains stable
+                # when datastore names are duplicated or renamed.
+                inventory[node._moId] = [node.name, node._moId, dc, storagePod]
             else:
                 logging.debug("[?         ] {level} {node}".format(node=node, level=('-' * level).ljust(7)))
             return inventory
@@ -1187,11 +1190,10 @@ class VmwareCollector():
 
                 for metric_name in self._metricNames.get(metric_type, []):
                     metric = metrics.get(metric_name)
-                    labelnames = metric._labelnames
-                    metric._labelnames = labelnames[0:len(self._labelNames[metric_type])]
-                    metric._labelnames += customAttributesLabelNames
-                    metric._labelnames += labelnames[len(self._labelNames[metric_type]):]
-                    metric._labelnames = list(map(lambda x: re.sub('[^a-zA-Z0-9_]', '_', x), metric._labelnames))
+                    labelnames = list(metric._labelnames)
+                    split = len(self._labelNames[metric_type])
+                    labelnames = labelnames[:split] + list(customAttributesLabelNames) + labelnames[split:]
+                    metric._labelnames = tuple(re.sub('[^a-zA-Z0-9_]', '_', x) for x in labelnames)
 
     @defer.inlineCallbacks
     def _vmware_get_datastores(self, ds_metrics):
@@ -1227,8 +1229,7 @@ class VmwareCollector():
 
         for datastore_id, datastore in results.items():
             try:
-                name = datastore['name']
-                labels = datastore_labels[name]
+                labels = list(datastore_labels[datastore_id])
 
                 """
                 insert the tags values if needed
