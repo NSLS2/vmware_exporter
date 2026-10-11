@@ -5,6 +5,7 @@ from unittest import mock
 import pytest
 import pytest_twisted
 import pytz
+from requests.exceptions import ConnectionError
 from pyVmomi import vim, vmodl
 from twisted.internet import defer
 from twisted.internet.error import ReactorAlreadyRunning
@@ -1365,6 +1366,42 @@ def test_collect_deferred_error_works():
 
         with pytest.raises(defer.FirstError):
             yield collector.collect()
+
+
+@pytest_twisted.inlineCallbacks
+def test_session_failure_preserves_original_error_and_closes_session():
+    collector = VmwareCollector(
+        '127.0.0.1',
+        'root',
+        'password',
+        {
+            'vms': False,
+            'vmguests': False,
+            'datastores': False,
+            'hosts': False,
+            'snapshots': False,
+        },
+        5000,
+    )
+    rest_session = mock.Mock()
+    error = ConnectionError('vcenter unavailable')
+
+    def defer_to_thread(function, *args, **kwargs):
+        try:
+            return defer.succeed(function(*args, **kwargs))
+        except Exception as exc:
+            return defer.fail(exc)
+
+    with mock.patch('vmware_exporter.vmware_exporter.requests.Session', return_value=rest_session), \
+            mock.patch('vmware_exporter.vmware_exporter.threads.deferToThread', side_effect=defer_to_thread):
+        rest_session.post.side_effect = error
+
+        with pytest.raises(ConnectionError, match='vcenter unavailable'):
+            yield collector.session
+
+        yield collector._vmware_disconnect()
+
+    rest_session.close.assert_called_once_with()
 
 
 @pytest_twisted.inlineCallbacks
