@@ -8,6 +8,7 @@ import pytz
 from pyVmomi import vim, vmodl
 from twisted.internet import defer
 from twisted.internet.error import ReactorAlreadyRunning
+from twisted.python import failure
 from twisted.web.server import NOT_DONE_YET
 from twisted.web.resource import Resource
 
@@ -32,6 +33,38 @@ def _succeed(result):
     d = BranchingDeferred()
     defer.succeed(result).chainDeferred(d)
     return d
+
+
+def test_branching_deferred_callback_none_and_repeat_completion():
+    deferred = BranchingDeferred()
+    early_results = []
+    deferred.addCallback(early_results.append)
+
+    deferred.callback(None)
+
+    late_results = []
+    deferred.addCallback(late_results.append)
+    assert early_results == [None]
+    assert late_results == [None]
+
+    with pytest.raises(defer.AlreadyCalledError):
+        deferred.errback(RuntimeError('already completed'))
+
+
+def test_branching_deferred_normalizes_errbacks():
+    deferred = BranchingDeferred()
+    early_failures = []
+    deferred.addErrback(early_failures.append)
+
+    error = RuntimeError('early failure')
+    deferred.errback(error)
+
+    late_failures = []
+    deferred.addErrback(late_failures.append)
+    for received in early_failures + late_failures:
+        assert isinstance(received, failure.Failure)
+        assert received.check(RuntimeError)
+        assert received.value is error
 
 
 @pytest_twisted.inlineCallbacks
@@ -1125,19 +1158,21 @@ def test_collect_datastore():
 
     collector.tags = {
         'datastores': {
-            'datastore-1': ['tag1']
+            'datastore:1': ['tag1'],
+            'datastore:2': ['tag2'],
         }
     }
 
     collector.__dict__['datastore_labels'] = _succeed({
-        'datastore-1': ['datastore-1', 'dc', 'ds_cluster'],
+        'datastore:1': ['datastore-1', 'datastore:1', 'dc', 'ds_cluster'],
+        'datastore:2': ['datastore-1', 'datastore:2', 'dc', 'ds_cluster'],
     })
 
     metrics = collector._create_metric_containers()
 
     with mock.patch.object(collector, 'batch_fetch_properties') as batch_fetch_properties:
         batch_fetch_properties.return_value = _succeed({
-            'datastore-1': {
+            'datastore:1': {
                 'name': 'datastore-1',
                 'summary.capacity': 0,
                 'summary.freeSpace': 0,
@@ -1146,6 +1181,16 @@ def test_collect_datastore():
                 'summary.accessible': True,
                 'summary.maintenanceMode': 'normal',
                 'triggeredAlarmState': 'triggeredAlarm:DatastoreDiskUsageAlarm:yellow,triggeredAlarm:OtherAlarm:red'
+            },
+            'datastore:2': {
+                'name': 'datastore-1',
+                'summary.capacity': 0,
+                'summary.freeSpace': 0,
+                'host': ['host-2'],
+                'vm': ['vm-2'],
+                'summary.accessible': True,
+                'summary.maintenanceMode': 'normal',
+                'triggeredAlarmState': '',
             }
         })
 
@@ -1156,6 +1201,7 @@ def test_collect_datastore():
 
     assert metrics['vmware_datastore_yellow_alarms'].samples[0][1] == {
         'ds_name': 'datastore-1',
+        'ds_id': 'datastore:1',
         'dc_name': 'dc',
         'ds_cluster': 'ds_cluster',
         'tags': 'tag1',
@@ -1166,6 +1212,7 @@ def test_collect_datastore():
 
     assert metrics['vmware_datastore_red_alarms'].samples[0][1] == {
         'ds_name': 'datastore-1',
+        'ds_id': 'datastore:1',
         'dc_name': 'dc',
         'ds_cluster': 'ds_cluster',
         'tags': 'tag1',
@@ -1174,6 +1221,7 @@ def test_collect_datastore():
 
     assert metrics['vmware_datastore_capacity_size'].samples[0][1] == {
         'ds_name': 'datastore-1',
+        'ds_id': 'datastore:1',
         'dc_name': 'dc',
         'ds_cluster': 'ds_cluster',
         'tags': 'tag1'
@@ -1182,6 +1230,7 @@ def test_collect_datastore():
 
     assert metrics['vmware_datastore_maintenance_mode'].samples[0][1] == {
         'ds_name': 'datastore-1',
+        'ds_id': 'datastore:1',
         'dc_name': 'dc',
         'ds_cluster': 'ds_cluster',
         'mode': 'normal',
@@ -1191,11 +1240,28 @@ def test_collect_datastore():
 
     assert metrics['vmware_datastore_accessible'].samples[0][1] == {
         'ds_name': 'datastore-1',
+        'ds_id': 'datastore:1',
         'dc_name': 'dc',
         'ds_cluster': 'ds_cluster',
         'tags': 'tag1'
     }
     assert metrics['vmware_datastore_accessible'].samples[0][2] == 1.0
+    assert {frozenset(sample[1].items()) for sample in metrics['vmware_datastore_accessible'].samples} == {
+        frozenset({
+            'ds_name': 'datastore-1',
+            'ds_id': 'datastore:1',
+            'dc_name': 'dc',
+            'ds_cluster': 'ds_cluster',
+            'tags': 'tag1',
+        }.items()),
+        frozenset({
+            'ds_name': 'datastore-1',
+            'ds_id': 'datastore:2',
+            'dc_name': 'dc',
+            'ds_cluster': 'ds_cluster',
+            'tags': 'tag2',
+        }.items()),
+    }
 
 
 @pytest_twisted.inlineCallbacks
@@ -1375,8 +1441,8 @@ def test_vmware_get_inventory():
     }
 
     assert ds == {
-        'datastore-1': ['datastore-1', 'dc-1', ''],
-        'datastore-2': ['datastore-2', 'dc-1', 'datastore2-folder'],
+        'datastore:1': ['datastore-1', 'datastore:1', 'dc-1', ''],
+        'datastore:2': ['datastore-2', 'datastore:2', 'dc-1', 'datastore2-folder'],
     }
 
 
