@@ -13,7 +13,6 @@ import os
 import re
 import ssl
 import sys
-import traceback
 import pytz
 import logging
 import datetime
@@ -64,7 +63,8 @@ class VmwareCollector():
             fetch_custom_attributes=False,
             ignore_ssl=False,
             fetch_tags=False,
-            fetch_alarms=False
+            fetch_alarms=False,
+            request_timeout=None,
     ):
 
         self.host = host
@@ -73,8 +73,13 @@ class VmwareCollector():
         self.ignore_ssl = ignore_ssl
         self.collect_only = collect_only
         self.specs_size = int(specs_size)
+        self.request_timeout = (
+            (float(request_timeout), float(request_timeout))
+            if request_timeout is not None else None
+        )
 
         self._session = None
+        self._connection = None
 
         # Custom Attributes
         # flag to wheter fetch custom attributes or not
@@ -428,9 +433,10 @@ class VmwareCollector():
             tasks.append(self._vmware_get_hosts(metrics))
             tasks.append(self._vmware_get_host_perf_manager_metrics(metrics))
 
-        yield parallelize(*tasks)
-
-        yield self._vmware_disconnect()
+        try:
+            yield parallelize(*tasks)
+        finally:
+            yield self._vmware_disconnect()
 
         logging.info("Finished collecting metrics from {vsphere_host}".format(vsphere_host=vsphere_host))
 
@@ -452,11 +458,11 @@ class VmwareCollector():
             try:
                 yield threads.deferToThread(
                     self._session.post,
-                    'https://{host}/rest/com/vmware/cis/session'.format(host=self.host)
+                    'https://{host}/rest/com/vmware/cis/session'.format(host=self.host),
+                    timeout=self.request_timeout,
                 )
-            except Exception as e:
-                logging.error('Error creating vcenter API session ({})'.format(e))
-                self._session = None
+            except Exception:
+                raise
 
         return self._session
 
@@ -469,7 +475,8 @@ class VmwareCollector():
         session = yield self.session
         response = yield threads.deferToThread(
             session.get,
-            'https://{host}/rest/com/vmware/cis/tagging/tag'.format(host=self.host)
+            'https://{host}/rest/com/vmware/cis/tagging/tag'.format(host=self.host),
+            timeout=self.request_timeout,
         )
         output = []
         try:
@@ -494,7 +501,8 @@ class VmwareCollector():
             session.post,
             'https://{host}/rest/com/vmware/cis/tagging/tag-association?~action=list-attached-objects-on-tags'
             .format(host=self.host),
-            json=jsonBody
+            json=jsonBody,
+            timeout=self.request_timeout,
         )
 
         output = {}
@@ -519,7 +527,8 @@ class VmwareCollector():
         for tagID in tagIDs:
             response = yield threads.deferToThread(
                 session.get,
-                'https://{host}/rest/com/vmware/cis/tagging/tag/id:{tag_id}'.format(host=self.host, tag_id=tagID)
+                'https://{host}/rest/com/vmware/cis/tagging/tag/id:{tag_id}'.format(host=self.host, tag_id=tagID),
+                timeout=self.request_timeout,
             )
             tagObj = response.json().get('value', {})
             if tagObj:
@@ -580,11 +589,11 @@ class VmwareCollector():
                 pwd=self.password,
                 sslContext=context,
             )
+            self._connection = vmware_connect
             return vmware_connect
 
-        except vmodl.MethodFault as error:
-            logging.error("Caught vmodl fault: {error}".format(error=error.msg))
-            return None
+        except vmodl.MethodFault:
+            raise
 
     @run_once_property
     @defer.inlineCallbacks
@@ -1151,12 +1160,21 @@ class VmwareCollector():
         """
         Disconnect from Vcenter
         """
-        connection = yield self.connection
-        yield threads.deferToThread(
-            connect.Disconnect,
-            connection,
-        )
-        del self.connection
+        if self._session is not None:
+            try:
+                yield threads.deferToThread(self._session.close)
+            except Exception as error:
+                logging.warning('Unable to close vcenter REST session (%s)', error)
+            finally:
+                self._session = None
+
+        if self._connection is not None:
+            try:
+                yield threads.deferToThread(connect.Disconnect, self._connection)
+            except Exception as error:
+                logging.warning('Unable to disconnect from vcenter (%s)', error)
+            finally:
+                self._connection = None
 
     def _vmware_full_snapshots_list(self, snapshots):
         """
@@ -1891,6 +1909,7 @@ class VMWareMetricsResource(Resource):
                 'fetch_custom_attributes': get_bool_env('VSPHERE_FETCH_CUSTOM_ATTRIBUTES', False),
                 'fetch_tags': get_bool_env('VSPHERE_FETCH_TAGS', False),
                 'fetch_alarms': get_bool_env('VSPHERE_FETCH_ALARMS', False),
+                'request_timeout': os.environ.get('VSPHERE_REQUEST_TIMEOUT'),
                 'collect_only': {
                     'vms': get_bool_env('VSPHERE_COLLECT_VMS', True),
                     'vmguests': get_bool_env('VSPHERE_COLLECT_VMGUESTS', True),
@@ -1918,6 +1937,7 @@ class VMWareMetricsResource(Resource):
                 'fetch_custom_attributes': get_bool_env('VSPHERE_{}_FETCH_CUSTOM_ATTRIBUTES'.format(section), False),
                 'fetch_tags': get_bool_env('VSPHERE_{}_FETCH_TAGS'.format(section), False),
                 'fetch_alarms': get_bool_env('VSPHERE_{}_FETCH_ALARMS'.format(section), False),
+                'request_timeout': os.environ.get('VSPHERE_{}_REQUEST_TIMEOUT'.format(section)),
                 'collect_only': {
                     'vms': get_bool_env('VSPHERE_{}_COLLECT_VMS'.format(section), True),
                     'vmguests': get_bool_env('VSPHERE_{}_COLLECT_VMGUESTS'.format(section), True),
@@ -1937,7 +1957,7 @@ class VMWareMetricsResource(Resource):
         try:
             yield self.generate_latest_metrics(request)
         except Exception:
-            logging.error(traceback.format_exc())
+            logging.exception('Collection failed')
             request.setResponseCode(500)
             request.write(b'# Collection failed')
             request.finish()
@@ -1977,6 +1997,7 @@ class VMWareMetricsResource(Resource):
             self.config[section]['ignore_ssl'],
             self.config[section]['fetch_tags'],
             self.config[section]['fetch_alarms'],
+            self.config[section].get('request_timeout'),
         )
         metrics = yield collector.collect()
 

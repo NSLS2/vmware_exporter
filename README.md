@@ -106,6 +106,7 @@ limited:
     fetch_custom_attributes: True
     fetch_tags: True
     fetch_alarms: False
+    request_timeout: 30
     collect_only:
         vms: False
         vmguests: False
@@ -132,6 +133,7 @@ Switching sections can be done by adding ?section=limited to the URL.
 | `VSPHERE_COLLECT_VMS`        		| config, env            | True     | Set to false to disable collection of virtual machine metrics 		|
 | `VSPHERE_COLLECT_VMGUESTS`   		| config, env            | True     | Set to false to disable collection of virtual machine guest metrics 	|
 | `VSPHERE_COLLECT_SNAPSHOTS`  		| config, env            | True     | Set to false to disable collection of snapshot metrics 			|
+| `VSPHERE_REQUEST_TIMEOUT` | config, env | unset | REST session/tag API connect and read timeout, in seconds |
 
 You can create new sections as well, with very similiar variables. For example, to create a `limited` section you can set:
 
@@ -150,8 +152,14 @@ You can create new sections as well, with very similiar variables. For example, 
 | `VSPHERE_LIMITED_COLLECT_VMS`        		| config, env            | True     | Set to false to disable collection of virtual machine metrics 		|
 | `VSPHERE_LIMITED_COLLECT_VMGUESTS`   		| config, env            | True     | Set to false to disable collection of virtual machine guest metrics 	|
 | `VSPHERE_LIMITED_COLLECT_SNAPSHOTS`  		| config, env            | True     | Set to false to disable collection of snapshot metrics 			|
+| `VSPHERE_LIMITED_REQUEST_TIMEOUT` | config, env | unset | REST session/tag API connect and read timeout, in seconds |
 
 You need to set at least `VSPHERE_SECTIONNAME_USER` for the section to be detected.
+
+`request_timeout` is a numeric number of seconds. When unset, Requests uses no
+explicit timeout. It applies only to REST session and tag API calls as equal
+connect and read timeouts; it is not an overall deadline and does not apply to
+SOAP calls.
 
 ### Prometheus configuration
 

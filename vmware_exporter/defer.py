@@ -121,5 +121,11 @@ class run_once_property(object):
 
 @defer.inlineCallbacks
 def parallelize(*args):
-    results = yield defer.DeferredList(args, fireOnOneErrback=True)
+    results = yield defer.DeferredList(
+        args,
+        consumeErrors=True,
+    )
+    for succeeded, result in results:
+        if not succeeded:
+            result.raiseException()
     return tuple(r[1] for r in results)

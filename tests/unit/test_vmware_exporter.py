@@ -5,6 +5,7 @@ from unittest import mock
 import pytest
 import pytest_twisted
 import pytz
+from requests.exceptions import ConnectionError
 from pyVmomi import vim, vmodl
 from twisted.internet import defer
 from twisted.internet.error import ReactorAlreadyRunning
@@ -15,7 +16,7 @@ from twisted.web.resource import Resource
 
 from vmware_exporter.vmware_exporter import main, registerEndpoints
 from vmware_exporter.vmware_exporter import HealthzResource, VmwareCollector, VMWareMetricsResource, IndexResource
-from vmware_exporter.defer import BranchingDeferred
+from vmware_exporter.defer import BranchingDeferred, parallelize
 
 
 EPOCH = datetime.datetime(1970, 1, 1, tzinfo=pytz.utc)
@@ -95,6 +96,125 @@ def test_branching_deferred_normalizes_errbacks():
 
     deferred.cancel()
     assert deferred.called
+
+
+@pytest_twisted.inlineCallbacks
+def test_parallelize_waits_for_all_children_before_raising():
+    failed = defer.Deferred()
+    pending = defer.Deferred()
+    error = RuntimeError('collection failed')
+    result = parallelize(failed, pending)
+
+    failed.errback(error)
+    assert not result.called
+
+    pending.callback('finished')
+    with pytest.raises(RuntimeError, match='collection failed'):
+        yield result
+
+
+@pytest_twisted.inlineCallbacks
+def test_parallelize_consumes_branching_deferred_failure():
+    failed = BranchingDeferred()
+    result = parallelize(failed)
+
+    assert len(failed._branches) == 1
+
+    failed.errback(RuntimeError('collection failed'))
+    with pytest.raises(RuntimeError, match='collection failed'):
+        yield result
+
+
+@pytest_twisted.inlineCallbacks
+def test_collect_waits_for_siblings_before_disconnect():
+    collect_only = {
+        'vms': True,
+        'vmguests': False,
+        'datastores': False,
+        'hosts': False,
+        'snapshots': False,
+    }
+    collector = VmwareCollector('127.0.0.1', 'root', 'password', collect_only, 5000)
+    collector._connection = mock.Mock()
+    failed = defer.Deferred()
+    pending = defer.Deferred()
+    error = RuntimeError('collection failed')
+
+    def defer_to_thread(function, *args, **kwargs):
+        try:
+            return defer.succeed(function(*args, **kwargs))
+        except Exception as exc:
+            return defer.fail(exc)
+
+    with mock.patch.object(collector, '_vmware_get_vms', return_value=failed), \
+            mock.patch.object(collector, '_vmware_get_vm_perf_manager_metrics', return_value=pending), \
+            mock.patch('vmware_exporter.vmware_exporter.connect.Disconnect') as disconnect, \
+            mock.patch('vmware_exporter.vmware_exporter.threads.deferToThread', side_effect=defer_to_thread):
+        collection = collector.collect()
+        failed.errback(error)
+        assert not disconnect.called
+        assert collector._connection is not None
+
+        pending.callback(None)
+        with pytest.raises(RuntimeError, match='collection failed'):
+            yield collection
+
+    disconnect.assert_called_once_with(mock.ANY)
+    assert collector._connection is None
+
+
+def test_environment_request_timeout_configuration():
+    args = mock.Mock(config_file=None)
+    environment = {
+        'VSPHERE_HOST': 'default.example.com',
+        'VSPHERE_USER': 'default-user',
+        'VSPHERE_REQUEST_TIMEOUT': '12.5',
+        'VSPHERE_LIMITED_HOST': 'limited.example.com',
+        'VSPHERE_LIMITED_USER': 'limited-user',
+        'VSPHERE_LIMITED_REQUEST_TIMEOUT': '7',
+    }
+
+    with mock.patch.dict('os.environ', environment, clear=True):
+        resource = VMWareMetricsResource(args)
+
+    assert resource.config['default']['request_timeout'] == '12.5'
+    assert resource.config['limited']['request_timeout'] == '7'
+
+
+@pytest_twisted.inlineCallbacks
+def test_request_timeout_is_forwarded_and_normalized():
+    args = mock.Mock(config_file=None)
+    config = {
+        'default': {
+            'vsphere_host': 'vcenter.example.com',
+            'vsphere_user': 'user',
+            'vsphere_password': 'password',
+            'collect_only': {},
+            'specs_size': 5000,
+            'fetch_custom_attributes': False,
+            'ignore_ssl': False,
+            'fetch_tags': False,
+            'fetch_alarms': False,
+            'request_timeout': '12.5',
+        }
+    }
+    resource = VMWareMetricsResource(args)
+    resource.config = config
+    request = mock.Mock()
+    request.args = {b'section': [b'default']}
+    collector = mock.Mock()
+    collector.collect.return_value = _succeed([])
+
+    with mock.patch('vmware_exporter.vmware_exporter.VmwareCollector', return_value=collector) as constructor:
+        yield resource.generate_latest_metrics(request)
+
+    constructor.assert_called_once_with(
+        'vcenter.example.com', 'user', 'password', {}, 5000, False, False, False, False, '12.5'
+    )
+    request_timeout = VmwareCollector(
+        'host', 'user', 'password', {}, 5000, request_timeout='12.5'
+    ).request_timeout
+    assert request_timeout == (12.5, 12.5)
 
 
 @pytest_twisted.inlineCallbacks
@@ -1363,8 +1483,44 @@ def test_collect_deferred_error_works():
         stack.enter_context(mock.patch.object(collector, '_vmware_get_hosts')).return_value = _succeed(None)
         stack.enter_context(mock.patch.object(collector, '_vmware_disconnect')).return_value = _succeed(None)
 
-        with pytest.raises(defer.FirstError):
+        with pytest.raises(RuntimeError, match='An error has occurred'):
             yield collector.collect()
+
+
+@pytest_twisted.inlineCallbacks
+def test_session_failure_preserves_original_error_and_closes_session():
+    collector = VmwareCollector(
+        '127.0.0.1',
+        'root',
+        'password',
+        {
+            'vms': False,
+            'vmguests': False,
+            'datastores': False,
+            'hosts': False,
+            'snapshots': False,
+        },
+        5000,
+    )
+    rest_session = mock.Mock()
+    error = ConnectionError('vcenter unavailable')
+
+    def defer_to_thread(function, *args, **kwargs):
+        try:
+            return defer.succeed(function(*args, **kwargs))
+        except Exception as exc:
+            return defer.fail(exc)
+
+    with mock.patch('vmware_exporter.vmware_exporter.requests.Session', return_value=rest_session), \
+            mock.patch('vmware_exporter.vmware_exporter.threads.deferToThread', side_effect=defer_to_thread):
+        rest_session.post.side_effect = error
+
+        with pytest.raises(ConnectionError, match='vcenter unavailable'):
+            yield collector.session
+
+        yield collector._vmware_disconnect()
+
+    rest_session.close.assert_called_once_with()
 
 
 @pytest_twisted.inlineCallbacks
@@ -1523,11 +1679,12 @@ def test_vmware_disconnect():
 
     # Mock that we have a connection
     connection = object()
-    collector.connection = connection
+    collector._connection = connection
 
     with mock.patch('vmware_exporter.vmware_exporter.connect') as connect:
         yield collector._vmware_disconnect()
         connect.Disconnect.assert_called_with(connection)
+        assert collector._connection is None
 
 
 @pytest_twisted.inlineCallbacks
@@ -1737,7 +1894,8 @@ def test_vmware_resource_async_render_GET_section():
         True,
         'On',
         True,
-        True
+        True,
+        None,
     )
 
     request.setResponseCode.assert_called_with(200)
@@ -1769,6 +1927,7 @@ def test_config_env_multiple_sections():
     assert resource.config == {
         'default': {
             'ignore_ssl': False,
+            'request_timeout': None,
             'vsphere_host': '127.0.0.10',
             'vsphere_user': 'username1',
             'vsphere_password': 'password1',
@@ -1786,6 +1945,7 @@ def test_config_env_multiple_sections():
         },
         'mysection': {
             'ignore_ssl': False,
+            'request_timeout': None,
             'vsphere_host': '127.0.0.11',
             'vsphere_user': 'username2',
             'vsphere_password': 'password2',
