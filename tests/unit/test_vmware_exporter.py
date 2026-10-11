@@ -51,6 +51,33 @@ def test_branching_deferred_callback_none_and_repeat_completion():
         deferred.errback(RuntimeError('already completed'))
 
 
+def test_branching_deferred_cancel_after_callback_is_harmless():
+    deferred = BranchingDeferred()
+
+    deferred.callback(None)
+    deferred.cancel()
+
+    assert deferred.called
+
+
+def test_branching_deferred_cancel_creates_failure_branch_and_completes():
+    deferred = BranchingDeferred()
+    failures = []
+    deferred.addErrback(failures.append)
+
+    deferred.cancel()
+    deferred.cancel()
+
+    assert deferred._completed
+    assert deferred.called
+    assert len(failures) == 1
+    assert failures[0].check(defer.CancelledError)
+    with pytest.raises(defer.AlreadyCalledError):
+        deferred.callback(None)
+    with pytest.raises(defer.AlreadyCalledError):
+        deferred.errback(RuntimeError('already completed'))
+
+
 def test_branching_deferred_normalizes_errbacks():
     deferred = BranchingDeferred()
     early_failures = []
@@ -65,6 +92,9 @@ def test_branching_deferred_normalizes_errbacks():
         assert isinstance(received, failure.Failure)
         assert received.check(RuntimeError)
         assert received.value is error
+
+    deferred.cancel()
+    assert deferred.called
 
 
 @pytest_twisted.inlineCallbacks

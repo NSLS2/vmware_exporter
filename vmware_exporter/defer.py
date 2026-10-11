@@ -62,6 +62,7 @@ class BranchingDeferred(defer.Deferred):
     def callback(self, result):
         if self._completed:
             raise defer.AlreadyCalledError
+        self.called = True
         self._completed = True
         self.result = result
         while self._branches:
@@ -74,6 +75,7 @@ class BranchingDeferred(defer.Deferred):
             err = failure.Failure()
         elif not isinstance(err, failure.Failure):
             err = failure.Failure(err)
+        self.called = True
         self._completed = True
         self.result = err
         while self._branches:
