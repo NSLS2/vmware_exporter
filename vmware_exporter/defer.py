@@ -43,31 +43,42 @@ class BranchingDeferred(defer.Deferred):
     '''
 
     def __init__(self):
-        self.callbacks = []
+        super().__init__()
+        self._branches = []
         self.result = None
+
+    def _branch(self):
+        if self.result is None:
+            branch = defer.Deferred()
+            self._branches.append(branch)
+            return branch
+
+        if isinstance(self.result, failure.Failure):
+            return defer.fail(self.result)
+
+        return defer.succeed(self.result)
 
     def callback(self, result):
         self.result = result
-        while self.callbacks:
-            self.callbacks.pop(0).callback(result)
+        while self._branches:
+            self._branches.pop(0).callback(result)
 
     def errback(self, err):
         self.result = err
-        while self.callbacks:
-            self.callbacks.pop(0).errback(err)
+        while self._branches:
+            self._branches.pop(0).errback(err)
 
     def addCallbacks(self, *args, **kwargs):
-        if self.result is None:
-            d = defer.Deferred()
-            d.addCallbacks(*args, **kwargs)
-            self.callbacks.append(d)
-            return
+        return self._branch().addCallbacks(*args, **kwargs)
 
-        if isinstance(self.result, failure.Failure):
-            defer.fail(self.result).addCallbacks(*args, **kwargs)
-            return
+    def addCallback(self, *args, **kwargs):
+        return self._branch().addCallback(*args, **kwargs)
 
-        defer.succeed(self.result).addCallbacks(*args, **kwargs)
+    def addErrback(self, *args, **kwargs):
+        return self._branch().addErrback(*args, **kwargs)
+
+    def addBoth(self, *args, **kwargs):
+        return self._branch().addBoth(*args, **kwargs)
 
 
 class run_once_property(object):
