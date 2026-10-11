@@ -45,10 +45,11 @@ class BranchingDeferred(defer.Deferred):
     def __init__(self):
         super().__init__()
         self._branches = []
+        self._completed = False
         self.result = None
 
     def _branch(self):
-        if self.result is None:
+        if not self._completed:
             branch = defer.Deferred()
             self._branches.append(branch)
             return branch
@@ -59,11 +60,23 @@ class BranchingDeferred(defer.Deferred):
         return defer.succeed(self.result)
 
     def callback(self, result):
+        if self._completed:
+            raise defer.AlreadyCalledError
+        self.called = True
+        self._completed = True
         self.result = result
         while self._branches:
             self._branches.pop(0).callback(result)
 
-    def errback(self, err):
+    def errback(self, err=None):
+        if self._completed:
+            raise defer.AlreadyCalledError
+        if err is None:
+            err = failure.Failure()
+        elif not isinstance(err, failure.Failure):
+            err = failure.Failure(err)
+        self.called = True
+        self._completed = True
         self.result = err
         while self._branches:
             self._branches.pop(0).errback(err)
