@@ -1909,6 +1909,7 @@ class VMWareMetricsResource(Resource):
                 'fetch_custom_attributes': get_bool_env('VSPHERE_FETCH_CUSTOM_ATTRIBUTES', False),
                 'fetch_tags': get_bool_env('VSPHERE_FETCH_TAGS', False),
                 'fetch_alarms': get_bool_env('VSPHERE_FETCH_ALARMS', False),
+                'request_timeout': os.environ.get('VSPHERE_REQUEST_TIMEOUT'),
                 'collect_only': {
                     'vms': get_bool_env('VSPHERE_COLLECT_VMS', True),
                     'vmguests': get_bool_env('VSPHERE_COLLECT_VMGUESTS', True),
@@ -1936,6 +1937,7 @@ class VMWareMetricsResource(Resource):
                 'fetch_custom_attributes': get_bool_env('VSPHERE_{}_FETCH_CUSTOM_ATTRIBUTES'.format(section), False),
                 'fetch_tags': get_bool_env('VSPHERE_{}_FETCH_TAGS'.format(section), False),
                 'fetch_alarms': get_bool_env('VSPHERE_{}_FETCH_ALARMS'.format(section), False),
+                'request_timeout': os.environ.get('VSPHERE_{}_REQUEST_TIMEOUT'.format(section)),
                 'collect_only': {
                     'vms': get_bool_env('VSPHERE_{}_COLLECT_VMS'.format(section), True),
                     'vmguests': get_bool_env('VSPHERE_{}_COLLECT_VMGUESTS'.format(section), True),
@@ -1954,10 +1956,10 @@ class VMWareMetricsResource(Resource):
     def _async_render_GET(self, request):
         try:
             yield self.generate_latest_metrics(request)
-        except Exception as error:
-            logging.error('Collection failed: %s', error)
+        except Exception:
+            logging.exception('Collection failed')
             request.setResponseCode(500)
-            request.write(b'Collection failed\n')
+            request.write(b'# Collection failed')
             request.finish()
 
         # We used to call request.processingFailed to send a traceback to browser
