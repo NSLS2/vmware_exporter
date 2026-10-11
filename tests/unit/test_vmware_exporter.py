@@ -1679,11 +1679,12 @@ def test_vmware_disconnect():
 
     # Mock that we have a connection
     connection = object()
-    collector.connection = connection
+    collector._connection = connection
 
     with mock.patch('vmware_exporter.vmware_exporter.connect') as connect:
         yield collector._vmware_disconnect()
         connect.Disconnect.assert_called_with(connection)
+        assert collector._connection is None
 
 
 @pytest_twisted.inlineCallbacks
@@ -1893,7 +1894,8 @@ def test_vmware_resource_async_render_GET_section():
         True,
         'On',
         True,
-        True
+        True,
+        None,
     )
 
     request.setResponseCode.assert_called_with(200)
@@ -1925,6 +1927,7 @@ def test_config_env_multiple_sections():
     assert resource.config == {
         'default': {
             'ignore_ssl': False,
+            'request_timeout': None,
             'vsphere_host': '127.0.0.10',
             'vsphere_user': 'username1',
             'vsphere_password': 'password1',
@@ -1942,6 +1945,7 @@ def test_config_env_multiple_sections():
         },
         'mysection': {
             'ignore_ssl': False,
+            'request_timeout': None,
             'vsphere_host': '127.0.0.11',
             'vsphere_user': 'username2',
             'vsphere_password': 'password2',
